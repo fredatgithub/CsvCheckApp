@@ -8,9 +8,9 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyTitle("CsvCheckApp")]
 [assembly: AssemblyDescription("")]
 [assembly: AssemblyConfiguration("")]
-[assembly: AssemblyCompany("e-SNCF")]
+[assembly: AssemblyCompany("")]
 [assembly: AssemblyProduct("CsvCheckApp")]
-[assembly: AssemblyCopyright("Copyright © e-SNCF 2025")]
+[assembly: AssemblyCopyright("Copyright © MIT Freddy Juhel 2025")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
 
