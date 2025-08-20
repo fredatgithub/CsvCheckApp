@@ -46,42 +46,76 @@ namespace CsvCheckApp
         // Récupérer les tailles max des colonnes
         var columnSizes = GetColumnSizes(conn, tableName);
 
-        // Vérifier et obtenir les erreurs
         var errors = ValidateCsv(conn, csvPath, tableName, columnSizes);
-
         Console.WriteLine("=== Erreurs détectées ===");
         foreach (var err in errors)
+        {
           Console.WriteLine(err);
-
-        // Obtenir les lignes valides
-        var validRows = GetValidRows(conn, csvPath, tableName, columnSizes);
-
-        Console.WriteLine("=== Lignes valides (non doublons, tailles correctes) ===");
-        foreach (var row in validRows)
-        {
-          Console.WriteLine(string.Join(" | ", row));
         }
 
-        // Insérer les lignes valides
-        if (validRows.Count > 0)
-        {
-          InsertValidRows(conn, tableName, validRows);
-          Console.WriteLine($"✅ {validRows.Count} lignes insérées dans {tableName}");
-        }
-        else
-        {
-          Console.WriteLine("⚠️ Aucune ligne valide à insérer.");
-        }
+        ProcessCsv(conn, csvPath, tableName, columnSizes);
       }
-
-      Console.WriteLine("Vérification terminée.");
 
       Console.WriteLine("Press any key to exit:");
       Console.ReadKey();
     }
 
     /// <summary>
-    /// Détection du séparateur CSV
+    /// Process the CSV file and insert valid rows into the PostgreSQL table.
+    /// </summary>
+    /// <param name="connection">The PostgreSQL connection.</param>
+    /// <param name="csvPath">The path to the CSV file.</param>
+    /// <param name="tableName">The name of the table to insert into.</param>
+    /// <param name="columnSizes">A dictionary mapping column names to their maximum sizes.</param>
+    static void ProcessCsv(NpgsqlConnection connection, string csvPath, string tableName, Dictionary<string, int?> columnSizes)
+    {
+      var validRows = GetValidRows(connection, csvPath, tableName, columnSizes);
+
+      if (validRows.Count == 0)
+      {
+        Console.WriteLine("Aucune ligne valide à insérer.");
+        return;
+      }
+
+      List<string> columnNames = new List<string>(columnSizes.Keys);
+
+      if (validRows.Count > 100)
+      {
+        Console.WriteLine("Utilisation de BulkInsert (plus de 100 lignes)...");
+        BulkInsertValidRows(connection, tableName, validRows, columnNames);
+      }
+      else
+      {
+        Console.WriteLine("Utilisation de Insert ligne par ligne (100 ou moins)...");
+        InsertValidRows(connection, tableName, validRows, columnNames);
+      }
+
+      Console.WriteLine($"{validRows.Count} lignes insérées avec succès.");
+    }
+
+    /// <summary>
+    /// Insert valid rows into the PostgreSQL table using bulk insert.
+    /// </summary>
+    /// <param name="connection">The PostgreSQL connection.</param>
+    /// <param name="tableName">The name of the table to insert into.</param>
+    /// <param name="validRows">A list of valid rows to insert.</param>
+    /// <param name="columnNames">A list of column names corresponding to the values in each row.</param>
+    static void BulkInsertValidRows(NpgsqlConnection connection, string tableName, List<List<string>> validRows, List<string> columnNames)
+    {
+      using (var writer = connection.BeginBinaryImport($"COPY {tableName} ({string.Join(",", columnNames)}) FROM STDIN (FORMAT BINARY)"))
+      {
+        foreach (var row in validRows)
+        {
+          writer.StartRow();
+          foreach (var val in row)
+            writer.Write(val);
+        }
+        writer.Complete();
+      }
+    }
+
+    /// <summary>
+    /// Detect the CSV separator character by analyzing the header line.
     /// </summary>
     /// <param name="filePath">The path to the CSV file.</param>
     /// <returns>The detected CSV separator character.</returns>
@@ -97,6 +131,11 @@ namespace CsvCheckApp
       }
     }
 
+    /// <summary>
+    /// Open a connection to the PostgreSQL database.
+    /// </summary>
+    /// <param name="connectionString">The connection string for the PostgreSQL database.</param>
+    /// <returns>A boolean indicating whether the connection was successful.</returns>
     static bool OpenConnection(string connectionString)
     {
       try
@@ -111,17 +150,23 @@ namespace CsvCheckApp
       }
     }
 
-    static Dictionary<string, int?> GetColumnSizes(NpgsqlConnection conn, string tableName)
+    /// <summary>
+    /// Get the maximum sizes of columns in a PostgreSQL table.
+    /// </summary>
+    /// <param name="connection">The PostgreSQL connection.</param>
+    /// <param name="tableName">The name of the table to inspect.</param>
+    /// <returns>A dictionary mapping column names to their maximum sizes.</returns>
+    static Dictionary<string, int?> GetColumnSizes(NpgsqlConnection connection, string tableName)
     {
       var sizes = new Dictionary<string, int?>();
 
-      string sql = @"
+      const string sql = @"
                 SELECT column_name, character_maximum_length
                 FROM information_schema.columns
                 WHERE table_name = @table
                 ORDER BY ordinal_position;";
 
-      using (var cmd = new NpgsqlCommand(sql, conn))
+      using (var cmd = new NpgsqlCommand(sql, connection))
       {
         cmd.Parameters.AddWithValue("table", tableName);
         using (var reader = cmd.ExecuteReader())
@@ -138,7 +183,15 @@ namespace CsvCheckApp
       return sizes;
     }
 
-    static List<string> ValidateCsv(NpgsqlConnection conn, string csvPath, string tableName, Dictionary<string, int?> columnSizes)
+    /// <summary>
+    /// Validate the CSV file against the PostgreSQL table.
+    /// </summary>
+    /// <param name="connection">The PostgreSQL connection.</param>
+    /// <param name="csvPath">The path to the CSV file.</param>
+    /// <param name="tableName">The name of the table to validate against.</param>
+    /// <param name="columnSizes">A dictionary mapping column names to their maximum sizes.</param>
+    /// <returns>A list of error messages, if any.</returns>
+    static List<string> ValidateCsv(NpgsqlConnection connection, string csvPath, string tableName, Dictionary<string, int?> columnSizes)
     {
       var errors = new List<string>();
 
@@ -172,14 +225,18 @@ namespace CsvCheckApp
 
           foreach (var col in dict)
           {
-            if (i > 0) whereClause += " AND ";
+            if (i > 0)
+            {
+              whereClause += " AND ";
+            }
+
             whereClause += $"{col.Key} = @p{i}";
             parameters.Add(new NpgsqlParameter($"p{i}", col.Value ?? DBNull.Value));
             i++;
           }
 
           string sqlCheck = $"SELECT COUNT(*) FROM {tableName} WHERE {whereClause}";
-          using (var cmd = new NpgsqlCommand(sqlCheck, conn))
+          using (var cmd = new NpgsqlCommand(sqlCheck, connection))
           {
             cmd.Parameters.AddRange(parameters.ToArray());
             long count = (long)cmd.ExecuteScalar();
@@ -197,7 +254,15 @@ namespace CsvCheckApp
       return errors;
     }
 
-    static List<List<string>> GetValidRows(NpgsqlConnection conn, string csvPath, string tableName, Dictionary<string, int?> columnSizes)
+    /// <summary>
+    /// Get valid rows from the CSV file based on column sizes and existing data in the PostgreSQL table.
+    /// </summary>
+    /// <param name="connection">The PostgreSQL connection.</param>
+    /// <param name="csvPath">The path to the CSV file.</param>
+    /// <param name="tableName">The name of the table to validate against.</param>
+    /// <param name="columnSizes">A dictionary mapping column names to their maximum sizes.</param>
+    /// <returns>A list of valid rows from the CSV file.</returns>
+    static List<List<string>> GetValidRows(NpgsqlConnection connection, string csvPath, string tableName, Dictionary<string, int?> columnSizes)
     {
       var validRows = new List<List<string>>();
 
@@ -234,14 +299,18 @@ namespace CsvCheckApp
 
             foreach (var col in dict)
             {
-              if (i > 0) whereClause += " AND ";
+              if (i > 0)
+              {
+                whereClause += " AND ";
+              }
+
               whereClause += $"{col.Key} = @p{i}";
               parameters.Add(new NpgsqlParameter($"p{i}", col.Value ?? DBNull.Value));
               i++;
             }
 
             string sqlCheck = $"SELECT COUNT(*) FROM {tableName} WHERE {whereClause}";
-            using (var cmd = new NpgsqlCommand(sqlCheck, conn))
+            using (var cmd = new NpgsqlCommand(sqlCheck, connection))
             {
               cmd.Parameters.AddRange(parameters.ToArray());
               long count = (long)cmd.ExecuteScalar();
@@ -266,48 +335,45 @@ namespace CsvCheckApp
       return validRows;
     }
 
-    public static void InsertValidRows(NpgsqlConnection conn, string tableName, List<List<string>> validRows)
+    /// <summary>
+    /// Insert valid rows into the PostgreSQL table.
+    /// </summary>
+    /// <param name="connection">The PostgreSQL connection.</param>
+    /// <param name="tableName">The name of the table to insert into.</param>
+    /// <param name="validRows">A list of valid rows to insert.</param>
+    /// <param name="columnNames">A list of column names corresponding to the values in each row.</param>
+    static void InsertValidRows(NpgsqlConnection connection, string tableName, List<List<string>> validRows, List<string> columnNames)
     {
-      // Récupérer la liste des colonnes pour l'insertion
-      var columns = new List<string>();
-      string sqlCols = @"
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_name = @table
-                ORDER BY ordinal_position;";
-
-      using (var cmd = new NpgsqlCommand(sqlCols, conn))
+      if (validRows.Count == 0)
       {
-        cmd.Parameters.AddWithValue("table", tableName);
-        using (var reader = cmd.ExecuteReader())
-        {
-          while (reader.Read())
-          {
-            columns.Add(reader.GetString(0));
-          }
-        }
+        return;
       }
+
+      var sql = $"INSERT INTO {tableName} ({string.Join(",", columnNames)}) VALUES ";
+      var values = new List<string>();
+      var parameters = new List<NpgsqlParameter>();
+      int paramIndex = 0;
 
       foreach (var row in validRows)
       {
-        string colList = string.Join(", ", columns);
-        string paramList = "";
-        var parameters = new List<NpgsqlParameter>();
-
+        var paramNames = new List<string>();
         for (int i = 0; i < row.Count; i++)
         {
-          if (i > 0) paramList += ", ";
-          paramList += $"@p{i}";
-          parameters.Add(new NpgsqlParameter($"p{i}", row[i] ?? (object)DBNull.Value));
+          string paramName = $"@p{paramIndex}";
+          paramNames.Add(paramName);
+          parameters.Add(new NpgsqlParameter(paramName, row[i] ?? (object)DBNull.Value));
+          paramIndex++;
         }
 
-        string sqlInsert = $"INSERT INTO {tableName} ({colList}) VALUES ({paramList})";
+        values.Add($"({string.Join(",", paramNames)})");
+      }
 
-        using (var cmd = new NpgsqlCommand(sqlInsert, conn))
-        {
-          cmd.Parameters.AddRange(parameters.ToArray());
-          cmd.ExecuteNonQuery();
-        }
+      sql += string.Join(",", values);
+
+      using (var cmd = new NpgsqlCommand(sql, connection))
+      {
+        cmd.Parameters.AddRange(parameters.ToArray());
+        cmd.ExecuteNonQuery();
       }
     }
   }
