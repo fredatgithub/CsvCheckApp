@@ -22,9 +22,26 @@ namespace CsvCheckApp
       const string csvPath = @"C:\temp\monfichier.csv";
       const string tableName = "tableCible";
 
+      // Détecter séparateur du fichier CSV
+      char separator = DetectCsvSeparator(csvPath);
+      Console.WriteLine($"Séparateur détecté : '{separator}'");
+      if (separator == '\0')
+      {
+        Console.WriteLine("Erreur : Impossible de détecter le séparateur du fichier CSV.");
+        return;
+      }
+      
+      Console.WriteLine($"Séparateur utilisé : '{separator}'");
+
       using (var conn = new NpgsqlConnection(connectionString))
       {
-        conn.Open();
+        if (!OpenConnection(connectionString))
+        {
+          Console.WriteLine("Échec d'ouverture de la connexion à la base de données PostgreSQL.");
+          return;
+        }
+
+        Console.WriteLine("Connexion à la base de données réussie.");
 
         // Récupérer les tailles max des colonnes
         var columnSizes = GetColumnSizes(conn, tableName);
@@ -44,6 +61,17 @@ namespace CsvCheckApp
         {
           Console.WriteLine(string.Join(" | ", row));
         }
+
+        // Insérer les lignes valides
+        if (validRows.Count > 0)
+        {
+          InsertValidRows(conn, tableName, validRows);
+          Console.WriteLine($"✅ {validRows.Count} lignes insérées dans {tableName}");
+        }
+        else
+        {
+          Console.WriteLine("⚠️ Aucune ligne valide à insérer.");
+        }
       }
 
       Console.WriteLine("Vérification terminée.");
@@ -52,11 +80,35 @@ namespace CsvCheckApp
       Console.ReadKey();
     }
 
-    static NpgsqlConnection CreateConnection(string connectionString)
+    /// <summary>
+    /// Détection du séparateur CSV
+    /// </summary>
+    /// <param name="filePath">The path to the CSV file.</param>
+    /// <returns>The detected CSV separator character.</returns>
+    static char DetectCsvSeparator(string filePath)
     {
-      var conn = new NpgsqlConnection(connectionString);
-      conn.Open();
-      return conn;
+      using (var reader = new StreamReader(filePath))
+      {
+        string headerLine = reader.ReadLine() ?? "";
+        int commaCount = headerLine.Split(',').Length;
+        int semicolonCount = headerLine.Split(';').Length;
+
+        return (semicolonCount > commaCount) ? ';' : ',';
+      }
+    }
+
+    static bool OpenConnection(string connectionString)
+    {
+      try
+      {
+        var conn = new NpgsqlConnection(connectionString);
+        conn.Open();
+        return true;
+      }
+      catch (Exception)
+      {
+        return false;
+      }
     }
 
     static Dictionary<string, int?> GetColumnSizes(NpgsqlConnection conn, string tableName)
@@ -212,6 +264,51 @@ namespace CsvCheckApp
       }
 
       return validRows;
+    }
+
+    public static void InsertValidRows(NpgsqlConnection conn, string tableName, List<List<string>> validRows)
+    {
+      // Récupérer la liste des colonnes pour l'insertion
+      var columns = new List<string>();
+      string sqlCols = @"
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = @table
+                ORDER BY ordinal_position;";
+
+      using (var cmd = new NpgsqlCommand(sqlCols, conn))
+      {
+        cmd.Parameters.AddWithValue("table", tableName);
+        using (var reader = cmd.ExecuteReader())
+        {
+          while (reader.Read())
+          {
+            columns.Add(reader.GetString(0));
+          }
+        }
+      }
+
+      foreach (var row in validRows)
+      {
+        string colList = string.Join(", ", columns);
+        string paramList = "";
+        var parameters = new List<NpgsqlParameter>();
+
+        for (int i = 0; i < row.Count; i++)
+        {
+          if (i > 0) paramList += ", ";
+          paramList += $"@p{i}";
+          parameters.Add(new NpgsqlParameter($"p{i}", row[i] ?? (object)DBNull.Value));
+        }
+
+        string sqlInsert = $"INSERT INTO {tableName} ({colList}) VALUES ({paramList})";
+
+        using (var cmd = new NpgsqlCommand(sqlInsert, conn))
+        {
+          cmd.Parameters.AddRange(parameters.ToArray());
+          cmd.ExecuteNonQuery();
+        }
+      }
     }
   }
 }
