@@ -108,8 +108,11 @@ namespace CsvCheckApp
         {
           writer.StartRow();
           foreach (var val in row)
+          {
             writer.Write(val);
+          }
         }
+
         writer.Complete();
       }
     }
@@ -277,12 +280,12 @@ namespace CsvCheckApp
           bool isValid = true;
 
           // Vérifier longueurs
-          foreach (var col in dict)
+          foreach (var column in dict)
           {
-            if (columnSizes.ContainsKey(col.Key) && columnSizes[col.Key].HasValue)
+            if (columnSizes.ContainsKey(column.Key) && columnSizes[column.Key].HasValue)
             {
-              string value = col.Value?.ToString() ?? "";
-              if (value.Length > columnSizes[col.Key].Value)
+              string value = column.Value?.ToString() ?? "";
+              if (value.Length > columnSizes[column.Key].Value)
               {
                 isValid = false;
                 break;
@@ -326,7 +329,10 @@ namespace CsvCheckApp
           {
             var rowValues = new List<string>();
             foreach (var val in dict.Values)
+            {
               rowValues.Add(val?.ToString() ?? "");
+            }
+
             validRows.Add(rowValues);
           }
         }
